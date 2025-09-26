@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>匿名在庫マネージャー（オフライン）</title>
+<style>
+  :root{--bg:#0f1115;--fg:#e8e8ea;--muted:#a9adba;--card:#171a22;--acc:#5fb3ff;--warn:#ffcc66;--bad:#ff6b6b;--good:#59d585;}
+  *{box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,"Hiragino Kaku Gothic ProN","Noto Sans JP","Yu Gothic UI",Meiryo,sans-serif}
+  body{margin:0;background:var(--bg);color:var(--fg)}
+  header{position:sticky;top:0;z-index:10;background:linear-gradient(180deg,var(--bg),rgba(15,17,21,.6));backdrop-filter: blur(8px);padding:10px 12px;border-bottom:1px solid #1f2330}
+  h1{margin:4px 0;font-size:18px}
+  nav{display:flex;gap:8px;flex-wrap:wrap}
+  nav button{flex:1 1 auto;padding:10px;border-radius:10px;border:1px solid #2a2f3d;background:var(--card);color:var(--fg)}
+  nav button.active{outline:2px solid var(--acc);}
+  main{padding:12px;max-width:980px;margin:0 auto}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .col{flex:1 1 260px}
+  .card{background:var(--card);border:1px solid #242938;border-radius:14px; padding:12px; margin:8px 0}
+  .card h2{font-size:16px;margin:0 0 8px 0}
+  input,select,textarea{width:100%;padding:10px;border-radius:10px;border:1px solid #2a2f3d;background:#0b0d12;color:var(--fg)}
+  label{font-size:12px;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:8px;border-bottom:1px solid #242938;text-align:right}
+  th{text-align:left;color:var(--muted);font-weight:600}
+  td:first-child,th:first-child{text-align:left}
+  .pill{display:inline-block;font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid #2a2f3d;background:#10131a;color:var(--muted)}
+  .btn{padding:10px 12px;border-radius:10px;border:1px solid #2a2f3d;background:#10131a;color:var(--fg);cursor:pointer}
+  .btn.primary{background:var(--acc);border-color:transparent;color:#021d33;font-weight:700}
+  .btn.warn{background:var(--warn);border-color:transparent;color:#3a2a00;font-weight:700}
+  .btn.bad{background:var(--bad);border-color:transparent;color:white;font-weight:700}
+  .btn.ghost{background:#0b0d12}
+  .flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .right{margin-left:auto}
+  .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .stat{padding:10px;border:1px dashed #2a2f3d;border-radius:12px}
+  .stat .v{font-size:18px;font-weight:800}
+  .muted{color:var(--muted)}
+  .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
+  .hr{height:1px;background:#232737;margin:8px 0}
+  .danger{color:var(--bad)}
+  .good{color:var(--good)}
+  footer{padding:16px 12px;color:var(--muted);font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+  <header>
+    <div class="flex">
+      <h1>匿名在庫マネージャー（端末内・オフライン）</h1>
+      <span class="pill right" id="statusPill">未保存</span>
+    </div>
+    <nav id="tabs"></nav>
+  </header>
+  <main>
+    <section id="tab-dashboard" class="tab"></section>
+    <section id="tab-items" class="tab" style="display:none"></section>
+    <section id="tab-moves" class="tab" style="display:none"></section>
+    <section id="tab-sales" class="tab" style="display:none"></section>
+    <section id="tab-labor" class="tab" style="display:none"></section>
+    <section id="tab-backup" class="tab" style="display:none"></section>
+  </main>
+  <footer>このアプリはデータを一切送信しません。すべて <span class="mono">localStorage</span> に保存されます。</footer>
+
+<script>
+const DB_KEY = "anonInventoryV1";
+const nowISO = ()=> new Date().toISOString().slice(0,10);
+const emptyDB = () => ({
+  items: [], purchases: [], sales: [], labor: [],
+  createdAt: Date.now(), updatedAt: Date.now(),
+});
+let db = load();
+function load(){ try{ const raw = localStorage.getItem(DB_KEY); if(!raw) return emptyDB(); const parsed=JSON.parse(raw); if(!parsed.items) return emptyDB(); return parsed;}catch(e){return emptyDB();}}
+function save(){ db.updatedAt=Date.now(); localStorage.setItem(DB_KEY, JSON.stringify(db)); setStatus("保存済み " + new Date(db.updatedAt).toLocaleString());}
+function setStatus(t){ document.getElementById("statusPill").textContent=t; }
+const uid = () => Math.random().toString(36).slice(2,10);
+const num = (v, def=0)=>{ const n=parseFloat(v); return Number.isFinite(n)?n:def; };
+const fmt = new Intl.NumberFormat("ja-JP",{maximumFractionDigits:0});
+const fmtJPY = (v)=> "¥"+fmt.format(Math.round(v||0));
+function getItemById(id){ return db.items.find(i=>i.id===id) }
+function compute(){
+  let revenue=0,cogs=0,unitsSold=0;
+  for(const s of db.sales){ const it=getItemById(s.itemId); if(!it) continue; const price=s.price ?? it.price ?? 0; const cost=it.cost ?? 0; revenue+=price*s.qty; cogs+=cost*s.qty; unitsSold+=s.qty; }
+  let laborCost=0,hours=0; for(const l of db.labor){ laborCost+=(l.hours||0)*(l.rate||0); hours+=(l.hours||0); }
+  const inventoryValue=db.items.reduce((sum,it)=> sum+(it.cost||0)*(it.stock||0),0);
+  const grossProfit=revenue-cogs; const operatingProfit=grossProfit-laborCost;
+  return {revenue,cogs,grossProfit,laborCost,operatingProfit,inventoryValue,unitsSold,hours};
+}
+const TabList=[{id:"dashboard",label:"ダッシュボード"},{id:"items",label:"商品"},{id:"moves",label:"入出庫"},{id:"sales",label:"売上"},{id:"labor",label:"人件費"},{id:"backup",label:"バックアップ"},];
+function renderTabs(){ const el=document.getElementById("tabs"); el.innerHTML=""; TabList.forEach((t,i)=>{const b=document.createElement("button"); b.textContent=t.label; b.className="btn"+(i===0?" active":""); b.onclick=()=>switchTab(t.id,b); el.appendChild(b);});}
+function switchTab(id,btn){ document.querySelectorAll(".tab").forEach(s=>s.style.display="none"); document.getElementById("tab-"+id).style.display=""; document.querySelectorAll("nav button").forEach(x=>x.classList.remove("active")); btn.classList.add("active"); render(); }
+function render(){ renderDashboard(); renderItems(); renderMoves(); renderSales(); renderLabor(); renderBackup(); }
+function renderDashboard(){ const el=document.getElementById("tab-dashboard"); const c=compute(); el.innerHTML = `
+<div class="row"><div class="col">
+  <div class="card"><h2>サマリー</h2>
+    <div class="grid3">
+      <div class="stat"><div class="label muted">売上</div><div class="v">${fmtJPY(c.revenue)}</div></div>
+      <div class="stat"><div class="label muted">原価（COGS）</div><div class="v">${fmtJPY(c.cogs)}</div></div>
+      <div class="stat"><div class="label muted">粗利益</div><div class="v ${c.grossProfit>=0?"good":"danger"}">${fmtJPY(c.grossProfit)}</div></div>
+    </div>
+    <div class="grid3" style="margin-top:8px">
+      <div class="stat"><div class="label muted">人件費</div><div class="v">${fmtJPY(c.laborCost)}</div></div>
+      <div class="stat"><div class="label muted">営業利益</div><div class="v ${c.operatingProfit>=0?"good":"danger"}">${fmtJPY(c.operatingProfit)}</div></div>
+      <div class="stat"><div class="label muted">在庫評価額</div><div class="v">${fmtJPY(c.inventoryValue)}</div></div>
+    </div>
+  </div>
+  <div class="card"><h2>活動量</h2>
+    <div class="grid3">
+      <div class="stat"><div class="label muted">販売数量</div><div class="v">${fmt.format(c.unitsSold)}</div></div>
+      <div class="stat"><div class="label muted">稼働時間</div><div class="v">${fmt.format(c.hours)} h</div></div>
+      <div class="stat"><div class="label muted">商品点数</div><div class="v">${fmt.format(db.items.length)}</div></div>
+    </div>
+  </div>
+</div>
+<div class="col">
+  <div class="card"><h2>クイック入力</h2>
+    <div class="grid3">
+      <div><label>販売日</label><input id="qi-sdate" type="date" value="${nowISO()}"></div>
+      <div><label>商品</label><select id="qi-sitem"></select></div>
+      <div><label>数量</label><input id="qi-sqty" type="number" inputmode="numeric" placeholder="1" value="1"></div>
+    </div>
+    <div class="grid3" style="margin-top:8px">
+      <div><label>単価（空なら既定価格）</label><input id="qi-sprice" type="number" inputmode="numeric" placeholder="（既定）"></div>
+      <div class="flex" style="align-self:end"><button class="btn primary" onclick="quickSale()">販売追加</button></div>
+    </div>
+    <div class="hr"></div>
+    <div class="grid3">
+      <div><label>入庫日</label><input id="qi-pdate" type="date" value="${nowISO()}"></div>
+      <div><label>商品</label><select id="qi-pitem"></select></div>
+      <div><label>数量</label><input id="qi-pqty" type="number" inputmode="numeric" placeholder="1" value="1"></div>
+    </div>
+    <div class="grid3" style="margin-top:8px">
+      <div><label>仕入れ単価（空なら既定原価）</label><input id="qi-pcost" type="number" inputmode="numeric" placeholder="（既定）"></div>
+      <div class="flex" style="align-self:end"><button class="btn" onclick="quickPurchase()">入庫追加</button></div>
+    </div>
+  </div>
+  <div class="card"><h2>ヒント</h2>
+    <div class="muted">・商品名は出さず <span class="mono">SKU/コード</span> だけで匿名性UP。<br>・バックアップは「暗号化エクスポート」推奨。<br>・このファイルを「オンマイiPhone」に保存すればiCloudに上がりません。</div>
+  </div>
+</div></div>`;
+  const opts=db.items.map(it=>`<option value="${it.id}">${(it.sku||it.name||"商品")}（在庫:${fmt.format(it.stock||0)}）</option>`).join("");
+  document.getElementById("qi-sitem").innerHTML=opts;
+  document.getElementById("qi-pitem").innerHTML=opts;
+}
+function quickSale(){
+  const date=document.getElementById("qi-sdate").value||nowISO();
+  const itemId=document.getElementById("qi-sitem").value;
+  const qty=num(document.getElementById("qi-sqty").value,1);
+  const it=getItemById(itemId); if(!it){alert("商品を先に登録してください");return;}
+  const price=document.getElementById("qi-sprice").value.trim()===""?(it.price||0):num(document.getElementById("qi-sprice").value,it.price||0);
+  if(qty<=0){alert("数量は1以上");return;}
+  if((it.stock||0)<qty){ if(!confirm("在庫を下回ります。続行しますか？")) return; }
+  db.sales.push({id:uid(),date,itemId,qty,price}); it.stock=(it.stock||0)-qty; save(); render();
+}
+function quickPurchase(){
+  const date=document.getElementById("qi-pdate").value||nowISO();
+  const itemId=document.getElementById("qi-pitem").value;
+  const qty=num(document.getElementById("qi-pqty").value,1);
+  const it=getItemById(itemId); if(!it){alert("商品を先に登録してください");return;}
+  const cost=document.getElementById("qi-pcost").value.trim()===""?(it.cost||0):num(document.getElementById("qi-pcost").value,it.cost||0);
+  if(qty<=0){alert("数量は1以上");return;}
+  db.purchases.push({id:uid(),date,itemId,qty,cost}); it.stock=(it.stock||0)+qty; if(cost>0) it.cost=cost; save(); render();
+}
+function renderItems(){
+  const el=document.getElementById("tab-items");
+  el.innerHTML=`
+  <div class="card"><h2>商品登録</h2>
+    <div class="grid3">
+      <div><label>SKU / コード（推奨）</label><input id="it-sku" placeholder="A001 など"></div>
+      <div><label>表示名（任意）</label><input id="it-name" placeholder="（空でOK）"></div>
+      <div></div>
+    </div>
+    <div class="grid3" style="margin-top:8px">
+      <div><label>仕入れ単価（原価）</label><input id="it-cost" type="number" inputmode="numeric" placeholder="0"></div>
+      <div><label>販売単価</label><input id="it-price" type="number" inputmode="numeric" placeholder="0"></div>
+      <div><label>初期在庫</label><input id="it-stock" type="number" inputmode="numeric" placeholder="0"></div>
+    </div>
+    <div class="flex" style="margin-top:8px">
+      <button class="btn primary" onclick="addItem()">商品を追加</button>
+      <button class="btn ghost" onclick="seed()">デモデータ投入</button>
+      <span class="muted">※匿名性のため名前は空でもOK。SKUだけで運用可能。</span>
+    </div>
+  </div>
+  <div class="card"><h2>商品一覧</h2>
+    <table><thead><tr><th>SKU/名称</th><th>原価</th><th>価格</th><th>在庫</th><th>評価額</th><th></th></tr></thead>
+    <tbody id="item-rows"></tbody></table>
+  </div>`;
+  const rows=db.items.map(it=>`
+    <tr>
+      <td>${it.sku||it.name||"(no name)"}</td>
+      <td>${fmtJPY(it.cost||0)}</td>
+      <td>${fmtJPY(it.price||0)}</td>
+      <td>${fmt.format(it.stock||0)}</td>
+      <td>${fmtJPY((it.cost||0)*(it.stock||0))}</td>
+      <td><button class="btn" onclick="editItem('${it.id}')">編集</button>
+          <button class="btn bad" onclick="delItem('${it.id}')">削除</button></td>
+    </tr>`).join("");
+  document.getElementById("item-rows").innerHTML = rows || `<tr><td colspan="6" class="muted">未登録です</td></tr>`;
+}
+function addItem(){
+  const sku=document.getElementById("it-sku").value.trim();
+  const name=document.getElementById("it-name").value.trim();
+  const cost=num(document.getElementById("it-cost").value,0);
+  const price=num(document.getElementById("it-price").value,0);
+  const stock=num(document.getElementById("it-stock").value,0);
+  if(!sku && !name){ alert("SKUか名称のどちらかは必要です"); return; }
+  db.items.push({id:uid(),sku,name,cost,price,stock}); save(); renderItems(); renderDashboard();
+  document.getElementById("it-sku").value=""; document.getElementById("it-name").value="";
+  document.getElementById("it-cost").value=""; document.getElementById("it-price").value=""; document.getElementById("it-stock").value="";
+}
+function editItem(id){
+  const it=getItemById(id); if(!it) return;
+  const sku=prompt("SKU/コード",it.sku||"") ?? it.sku;
+  const name=prompt("表示名（任意）",it.name||"") ?? it.name;
+  const cost=num(prompt("原価",it.cost??0),it.cost??0);
+  const price=num(prompt("価格",it.price??0),it.price??0);
+  const stock=num(prompt("在庫",it.stock??0),it.stock??0);
+  Object.assign(it,{sku,name,cost,price,stock}); save(); render();
+}
+function delItem(id){
+  if(!confirm("削除してよろしいですか？")) return;
+  db.items=db.items.filter(i=>i.id!==id); save(); render();
+}
+function renderMoves(){
+  const el=document.getElementById("tab-moves");
+  const purRows=db.purchases.map(p=>{ const it=getItemById(p.itemId); return `<tr>
+      <td>${p.date}</td><td>${it?.sku||it?.name||"(削除済み商品)"}</td>
+      <td>${fmt.format(p.qty)}</td><td>${fmtJPY(p.cost||0)}</td>
+      <td><button class="btn bad" onclick="undoPurchase('${p.id}')">取消</button></td></tr>`; }).join("");
+  el.innerHTML=`<div class="card"><h2>入庫履歴（仕入）</h2>
+  <table><thead><tr><th>日付</th><th>商品</th><th>数量</th><th>単価</th><th></th></tr></thead>
+  <tbody>${purRows || `<tr><td colspan="5" class="muted">履歴なし</td></tr>`}</tbody></table></div>`;
+}
+function undoPurchase(id){
+  const p=db.purchases.find(x=>x.id===id); if(!p) return;
+  if(!confirm("この入庫を取り消しますか？在庫が減ります。")) return;
+  const it=getItemById(p.itemId); if(it){ it.stock=(it.stock||0)-(p.qty||0); }
+  db.purchases=db.purchases.filter(x=>x.id!==id); save(); render();
+}
+function renderSales(){
+  const el=document.getElementById("tab-sales");
+  const rows=db.sales.map(s=>{ const it=getItemById(s.itemId); return `<tr>
+    <td>${s.date}</td><td>${it?.sku||it?.name||"(削除済み商品)"}</td>
+    <td>${fmt.format(s.qty)}</td><td>${fmtJPY(s.price ?? it?.price ?? 0)}</td>
+    <td>${fmtJPY((s.price ?? it?.price ?? 0) * (s.qty||0))}</td>
+    <td><button class="btn bad" onclick="undoSale('${s.id}')">取消</button></td></tr>`; }).join("");
+  const sum=db.sales.reduce((a,s)=> a + (s.qty||0) * (s.price ?? getItemById(s.itemId)?.price ?? 0), 0);
+  el.innerHTML=`<div class="card"><div class="flex"><h2>売上履歴</h2><span class="right pill">合計 ${fmtJPY(sum)}</span></div>
+  <table><thead><tr><th>日付</th><th>商品</th><th>数量</th><th>単価</th><th>金額</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="6" class="muted">履歴なし</td></tr>`}</tbody></table></div>`;
+}
+function undoSale(id){
+  const s=db.sales.find(x=>x.id===id); if(!s) return;
+  if(!confirm("この売上を取り消しますか？在庫が戻ります。")) return;
+  const it=getItemById(s.itemId); if(it){ it.stock=(it.stock||0)+(s.qty||0); }
+  db.sales=db.sales.filter(x=>x.id!==id); save(); render();
+}
+function renderLabor(){
+  const el=document.getElementById("tab-labor");
+  const sum=db.labor.reduce((a,l)=> a + (l.hours||0)*(l.rate||0), 0);
+  el.innerHTML=`<div class="card"><h2>人件費の記録</h2>
+    <div class="grid3"><div><label>日付</label><input id="lb-date" type="date" value="${nowISO()}"></div>
+    <div><label>時間（h）</label><input id="lb-hours" type="number" inputmode="decimal" placeholder="2"></div>
+    <div><label>時給</label><input id="lb-rate" type="number" inputmode="numeric" placeholder="1000"></div></div>
+    <div class="grid2" style="margin-top:8px"><div><label>メモ（任意）</label><input id="lb-note" placeholder="梱包・出荷など"></div>
+    <div class="flex" style="align-self:end;justify-content:flex-end"><button class="btn" onclick="addLabor()">追加</button></div></div>
+  </div>
+  <div class="card"><div class="flex"><h2>人件費一覧</h2><span class="right pill">合計 ${fmtJPY(sum)}</span></div>
+    <table><thead><tr><th>日付</th><th>時間</th><th>時給</th><th>金額</th><th>メモ</th><th></th></tr></thead>
+    <tbody id="labor-rows"></tbody></table></div>`;
+  const rows=db.labor.map(l=>`
+    <tr><td>${l.date}</td><td>${fmt.format(l.hours||0)}</td>
+    <td>${fmtJPY(l.rate||0)}</td><td>${fmtJPY((l.hours||0)*(l.rate||0))}</td>
+    <td>${(l.note||"")}</td><td><button class="btn bad" onclick="delLabor('${l.id}')">削除</button></td></tr>`).join("");
+  document.getElementById("labor-rows").innerHTML = rows || `<tr><td colspan="6" class="muted">未登録です</td></tr>`;
+}
+function addLabor(){
+  const date=document.getElementById("lb-date").value||nowISO();
+  const hours=num(document.getElementById("lb-hours").value,0);
+  const rate=num(document.getElementById("lb-rate").value,0);
+  const note=document.getElementById("lb-note").value.trim();
+  if(hours<=0 || rate<0){ alert("時間/時給を確認してください"); return; }
+  db.labor.push({id:uid(),date,hours,rate,note}); save(); renderLabor(); renderDashboard();
+  document.getElementById("lb-hours").value=""; document.getElementById("lb-rate").value=""; document.getElementById("lb-note").value="";
+}
+function delLabor(id){ db.labor=db.labor.filter(l=>l.id!==id); save(); render(); }
+async function deriveKey(pass){
+  const enc=new TextEncoder(); const salt=enc.encode("anon-inv-salt-v1");
+  const baseKey=await crypto.subtle.importKey("raw",enc.encode(pass),"PBKDF2",false,["deriveKey"]);
+  return await crypto.subtle.deriveKey({name:"PBKDF2",salt,iterations:200000,hash:"SHA-256"}, baseKey, {name:"AES-GCM",length:256}, false, ["encrypt","decrypt"]);
+}
+async function encryptText(text,pass){ const iv=crypto.getRandomValues(new Uint8Array(12)); const key=await deriveKey(pass); const ct=await crypto.subtle.encrypt({name:"AES-GCM",iv},key,new TextEncoder().encode(text)); const blob=new Blob([iv,new Uint8Array(ct)],{type:"application/octet-stream"}); return blob; }
+async function decryptToText(buf,pass){ const u8=new Uint8Array(buf); const iv=u8.slice(0,12); const ct=u8.slice(12); const key=await deriveKey(pass); const pt=await crypto.subtle.decrypt({name:"AES-GCM",iv},key,ct); return new TextDecoder().decode(pt); }
+function downloadBlob(blob,filename){ const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},500);}
+function renderBackup(){ const el=document.getElementById("tab-backup"); el.innerHTML=`
+<div class="card"><h2>バックアップ / リセット</h2>
+  <div class="grid2">
+    <div class="stat"><div class="label muted">暗号化エクスポート</div>
+      <div class="flex" style="margin-top:6px"><input id="bk-pass" type="password" placeholder="パスフレーズ">
+      <button class="btn primary" onclick="exportEncrypted()">エクスポート</button></div>
+      <div class="muted" style="margin-top:6px">AES-256-GCM / PBKDF2-SHA256(200k)</div>
+    </div>
+    <div class="stat"><div class="label muted">暗号化インポート</div>
+      <div class="flex" style="margin-top:6px"><input id="bk-file" type="file" accept=".bin,application/octet-stream">
+      <input id="bk-pass2" type="password" placeholder="パスフレーズ">
+      <button class="btn" onclick="importEncrypted()">インポート</button></div>
+    </div>
+  </div>
+  <div class="hr"></div>
+  <div class="flex">
+    <button class="btn ghost" onclick="exportCSV()">CSVエクスポート（平文）</button>
+    <span class="right"></span>
+    <button class="btn warn" onclick="if(confirm('初期化します。元に戻せません。')){ localStorage.removeItem(DB_KEY); db=emptyDB(); save(); render(); }">全データ初期化</button>
+  </div>
+</div>`;}
+async function exportEncrypted(){ const pass=document.getElementById("bk-pass").value; if(!pass){ alert("パスフレーズを入力してください"); return; } const blob=await encryptText(JSON.stringify(db),pass); downloadBlob(blob,"inventory_backup.bin"); }
+async function importEncrypted(){ const f=document.getElementById("bk-file").files?.[0]; const pass=document.getElementById("bk-pass2").value; if(!f||!pass){ alert("ファイルとパスフレーズを指定してください"); return; } try{ const buf=await f.arrayBuffer(); const text=await decryptToText(buf,pass); const parsed=JSON.parse(text); if(!parsed.items) throw new Error("bad format"); db=parsed; save(); render(); alert("インポート成功"); }catch(e){ alert("復号に失敗しました。パスフレーズ/ファイルを確認してください。"); }}
+function exportCSV(){ const esc=s=>`"${String(s??"").replace(/"/g,'""')}"`; const lines=[];
+  lines.push("# items"); lines.push(["id","sku","name","cost","price","stock"].map(esc).join(","));
+  db.items.forEach(it=> lines.push([it.id,it.sku,it.name,it.cost,it.price,it.stock].map(esc).join(",")));
+  lines.push(""); lines.push("# purchases"); lines.push(["id","date","itemId","qty","cost"].map(esc).join(","));
+  db.purchases.forEach(p=> lines.push([p.id,p.date,p.itemId,p.qty,p.cost].map(esc).join(",")));
+  lines.push(""); lines.push("# sales"); lines.push(["id","date","itemId","qty","price"].map(esc).join(","));
+  db.sales.forEach(s=> lines.push([s.id,s.date,s.itemId,s.qty,s.price].map(esc).join(",")));
+  lines.push(""); lines.push("# labor"); lines.push(["id","date","hours","rate","note"].map(esc).join(","));
+  db.labor.forEach(l=> lines.push([l.id,l.date,l.hours,l.rate,l.note].map(esc).join(",")));
+  const blob=new Blob([lines.join("\n")],{type:"text/csv"}); downloadBlob(blob,"inventory_export.csv");
+}
+function seed(){
+  if(!confirm("デモデータを追加しますか？")) return;
+  const a={id:uid(),sku:"A001",name:"",cost:300,price:600,stock:20};
+  const b={id:uid(),sku:"B010",name:"",cost:1200,price:1800,stock:5};
+  db.items.push(a,b);
+  db.purchases.push({id:uid(),date:nowISO(),itemId:a.id,qty:20,cost:300});
+  db.purchases.push({id:uid(),date:nowISO(),itemId:b.id,qty:5,cost:1200});
+  db.sales.push({id:uid(),date:nowISO(),itemId:a.id,qty:3,price:600});
+  db.labor.push({id:uid(),date:nowISO(),hours:2,rate:1200,note:"梱包/配送"});
+  save(); render();
+}
+renderTabs(); render(); setStatus("読み込み完了");
+</script>
+</body>
+</html>
